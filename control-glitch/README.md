@@ -3,10 +3,15 @@
 Animates the mosaic panel behind the subject so the pattern "shifts" like the
 Oldest House in *Control*, while the person stays pixel-for-pixel untouched.
 
-- Medallion rings counter-rotate and lock into place on 22.5° steps.
-- Star rosettes click round in 30° steps, triggered by resonance ripples.
+The pattern never stops moving:
+
+- Medallion rings turn continuously in alternating directions, lurching on a
+  one-second mechanical tick.
+- Star rosettes and the small blue stars spin like counter-rotating gears,
+  mirrored left/right, with their ticks rippling out from the centre.
+- Resonance ripples run out of and back into the medallion.
 - Hiss-style glitch bursts: RGB split, tears, macroblocks, red tint, stutter.
-- 12 s seamless loop. Every motion nets to zero, so it loops cleanly.
+- 16 s seamless loop. Every piece turns a whole number of times per loop.
 
 ```sh
 pip install opencv-python-headless numpy "rembg[cpu]"   # rembg only if no --mask

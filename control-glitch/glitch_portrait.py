@@ -6,16 +6,19 @@ The person is never re-rendered. Every output pixel is
     photo + (1 - alpha) * (animated_panel - static_panel)
 
 so wherever the segmentation matte says "person" (alpha == 1) the original
-photo pixels pass through untouched. Only the glass mosaic moves:
+photo pixels pass through untouched. Only the glass mosaic moves, and it
+never stops:
 
-  * the medallion splits into three rings that counter-rotate and lock back
-    into place on its 16-fold symmetry (22.5 degree clicks),
-  * the 12-point star rosettes spin in 30 degree clicks, triggered by a
-    "resonance" ripple that travels out of (and later back into) the centre,
+  * the medallion splits into three rings that turn continuously in
+    alternating directions, lurching forward on a one-second tick,
+  * the 12-point rosettes and the small blue stars spin like counter-rotating
+    gears, mirrored left/right, their ticks rippling out from the centre,
+  * "resonance" ripples run out of and back into the medallion,
   * Hiss-style glitch bursts: RGB split, horizontal tears, macroblock
     corruption, red tint, scanlines and time stutter.
 
-Every motion nets to zero over the loop, so the clip loops seamlessly.
+Every element turns a whole number of times per loop, so the clip loops
+seamlessly.
 
 The panel geometry below was measured on the original 1890x2576 photo.
 
@@ -32,16 +35,18 @@ import cv2
 import numpy as np
 
 FPS = 30
-LOOP = 12.0
+LOOP = 16.0
 NFRAMES = int(FPS * LOOP)
+BEATS = 16  # mechanical ticks per loop
 
 # Glass corners in the photo (TL, TR, BR, BL) and the rectified panel size.
 PANEL_QUAD = np.float32([[32, 517], [1574, 507], [1556, 2049], [58, 2033]])
 S = 1536
 C = 771.0  # medallion centre in rectified coords (x == y)
 
-# Medallion rings (inner, outer radius). The red band (457-490) stays put.
-RINGS = [(0, 170), (170, 365), (365, 455)]
+# Medallion rings: (inner radius, outer radius, turns per loop, beat offset).
+# The red band (457-490) stays put.
+RINGS = [(0, 170, 1, 0.0), (170, 365, -1, 0.33), (365, 455, 1, 0.66)]
 
 # (x, y, radius) of the 12-point rosettes that sit clear of bars and edges.
 ROSETTES = [
@@ -53,68 +58,105 @@ ROSETTES = [
 
 # Resonance ripples: (start, start radius, speed px/s, displacement px).
 # Negative speed travels from the corners into the medallion.
-WAVES = [(0.80, 0.0, 950.0, 7.0), (5.60, 1150.0, -950.0, 8.0), (9.20, 0.0, 1300.0, 5.0)]
-
-# (ring, start, duration, degrees). Each ring sums to zero.
-RING_EVENTS = [
-    (0, 0.92, 0.55, 22.5), (0, 6.70, 0.70, 45.0), (0, 9.25, 1.00, -67.5),
-    (1, 1.08, 0.60, -22.5), (1, 6.52, 0.75, -45.0), (1, 7.90, 0.55, 22.5),
-    (1, 9.40, 1.00, 45.0),
-    (2, 1.26, 0.65, 22.5), (2, 3.20, 0.50, 22.5), (2, 6.35, 0.75, 45.0),
-    (2, 9.55, 1.10, -90.0),
-]
+WAVES = [(0.0, 0.0, 950.0, 6.0), (4.0, 1150.0, -950.0, 7.0),
+         (8.0, 0.0, 950.0, 6.0), (12.0, 1150.0, -950.0, 7.0)]
 
 # (start, duration, intensity, hiss)
 GLITCHES = [
-    (0.78, 0.14, 0.55, False),
-    (3.12, 0.22, 0.70, False),
-    (4.62, 0.07, 0.35, False),
-    (5.55, 0.10, 0.50, False),
-    (6.25, 0.55, 1.00, True),
-    (7.72, 0.08, 0.40, False),
-    (9.15, 0.30, 0.85, True),
-    (11.10, 0.05, 0.25, False),
+    (0.95, 0.12, 0.50, False),
+    (2.50, 0.20, 0.65, False),
+    (3.90, 0.08, 0.35, False),
+    (5.05, 0.45, 1.00, True),
+    (6.60, 0.08, 0.40, False),
+    (7.95, 0.14, 0.60, False),
+    (9.70, 0.20, 0.70, False),
+    (11.20, 0.07, 0.30, False),
+    (13.05, 0.40, 0.90, True),
+    (14.60, 0.10, 0.45, False),
 ]
 
-# Red flashes from the centre: (time, strength)
-PULSES = [(0.80, 0.9), (5.60 + 1150.0 / 950.0, 1.0), (9.20, 0.7)]
+# Red flashes from the centre as ripples leave or arrive: (time, strength)
+PULSES = [(0.0, 0.8), (4.0 + 1150.0 / 950.0, 1.0), (8.0, 0.8), (12.0 + 1150.0 / 950.0, 1.0)]
 
 
-def ease_in_out_back(x, k=1.0):
-    x = min(max(x, 0.0), 1.0)
-    c2 = k * 1.525
-    if x < 0.5:
-        return ((2 * x) ** 2 * ((c2 + 1) * 2 * x - c2)) / 2
-    return ((2 * x - 2) ** 2 * ((c2 + 1) * (2 * x - 2) + c2) + 2) / 2
+def smootherstep(x):
+    return x * x * x * (x * (6 * x - 15) + 10)
 
 
-def wave_arrival(wave, d):
-    t0, r0, speed, _ = wave
-    return t0 + (d - r0) / speed
+def spin(t, turns, phase, mix=0.6):
+    """Angle in degrees of a piece turning `turns` times per loop.
+
+    A steady turn blended with a stepped one, so it never stops but lurches
+    forward on every beat. `phase` shifts the ticks, in loops.
+    """
+    u = t / LOOP + phase
+    k = math.floor(u * BEATS)
+    stepped = (k + smootherstep(u * BEATS - k)) / BEATS
+    return 360.0 * turns * ((1 - mix) * u + mix * stepped)
 
 
-def build_rosette_events():
-    """Rosettes click in 30 degree steps (12-fold symmetry), netting to zero."""
-    events = []
-    by_angle = sorted(range(len(ROSETTES)),
-                      key=lambda i: math.atan2(ROSETTES[i][1] - C, ROSETTES[i][0] - C))
-    n = len(ROSETTES)
-    for i, (x, y, _) in enumerate(ROSETTES):
-        d = math.hypot(x - C, y - C)
-        k = by_angle.index(i)
-        events.append((i, wave_arrival(WAVES[0], d), 0.50, 30.0))
-        events.append((i, 3.50 + 0.07 * k, 0.45, 30.0))            # clockwise cascade
-        events.append((i, wave_arrival(WAVES[1], d), 0.70, -60.0))
-        events.append((i, 7.70 + 0.06 * (n - 1 - k), 0.45, 30.0))  # counter-clockwise cascade
-        events.append((i, wave_arrival(WAVES[2], d), 0.45, -30.0))
-    return events
+def ripple_delay(x, y):
+    """Seconds after the medallion that a tick reaches (x, y)."""
+    return (math.hypot(x - C, y - C) - 480) / 1200
 
 
-ROSETTE_EVENTS = build_rosette_events()
+def ring_spin(i):
+    _, _, turns, beat = RINGS[i]
+    return turns, beat / BEATS
 
 
-def angle_at(events, idx, t):
-    return sum(a * ease_in_out_back((t - t0) / d) for i, t0, d, a in events if i == idx)
+def rosette_spin(x, y):
+    return (1 if x < C else -1), -ripple_delay(x, y) / LOOP
+
+
+def star_spin(x, y):
+    # Opposite to the rosettes in the same half, ticking on the off-beat.
+    return (-2 if x < C else 2), -ripple_delay(x, y) / LOOP + 0.5 / BEATS
+
+
+def find_blue_stars(base):
+    """Centres and radii of the small blue six-point stars in the tessellation."""
+    img = (np.clip(base, 0, 1) * 255).astype(np.uint8)
+    hsv = cv2.cvtColor(cv2.GaussianBlur(img, (0, 0), 1.5), cv2.COLOR_BGR2HSV).astype(int)
+    blue = ((hsv[..., 0] >= 95) & (hsv[..., 0] <= 130) & (hsv[..., 1] > 45)).astype(np.uint8)
+    blue = cv2.morphologyEx(blue, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+    dist = cv2.distanceTransform(blue, cv2.DIST_L2, 5)
+    peaks = (dist == cv2.dilate(dist, np.ones((31, 31)))) & (dist > 6)
+    pad = 80
+    g = cv2.copyMakeBorder(cv2.GaussianBlur(base, (0, 0), 1.2), pad, pad, pad, pad, cv2.BORDER_REFLECT)
+
+    def asymmetry(cx, cy, r=34):
+        x0, y0 = int(cx) + pad - r - 4, int(cy) + pad - r - 4
+        sub = g[y0:y0 + 2 * r + 9, x0:x0 + 2 * r + 9]
+        c = (cx + pad - x0, cy + pad - y0)
+        M = cv2.getRotationMatrix2D((float(c[0]), float(c[1])), 60, 1)
+        rot = cv2.warpAffine(sub, M, sub.shape[1::-1], borderMode=cv2.BORDER_REFLECT)
+        yy, xx = np.ogrid[:sub.shape[0], :sub.shape[1]]
+        return np.abs(rot - sub)[(xx - c[0]) ** 2 + (yy - c[1]) ** 2 < r * r].mean()
+
+    stars = []
+    for y, x in zip(*np.nonzero(peaks)):
+        if (math.hypot(x - C, y - C) < 500 or min(abs(x - C), abs(y - C)) < 60
+                or min(x, y, S - 1 - x, S - 1 - y) < 40
+                or any(math.hypot(x - rx, y - ry) < rr + 30 for rx, ry, rr in ROSETTES)
+                or any(math.hypot(x - sx, y - sy) < 40 for sx, sy in stars)):
+            continue
+        # Refine the centre so the star turns without wobbling.
+        best = (asymmetry(x, y), x, y)
+        for step in (4, 2, 1):
+            bx, by = best[1], best[2]
+            for dx in (-1, 0, 1):
+                for dy in (-1, 0, 1):
+                    e = asymmetry(bx + dx * step, by + dy * step)
+                    if e < best[0]:
+                        best = (e, bx + dx * step, by + dy * step)
+        stars.append((best[1], best[2]))
+
+    out = []
+    for i, (x, y) in enumerate(stars):
+        nn = min((math.hypot(x - a, y - b) for j, (a, b) in enumerate(stars) if j != i), default=99)
+        out.append((int(x), int(y), int(min(34, nn / 2 - 2))))
+    return out
 
 
 # ---------------------------------------------------------------- assets --
@@ -173,6 +215,7 @@ def load_assets(photo_path, mask_path):
         keep=((1 - alpha[y0:y1, x0:x1]) * q)[..., None],
         rad=rad, xx=xx, yy=yy,
         ring_band=ring_band, ring_glow=cv2.GaussianBlur(ring_band, (0, 0), 7),
+        stars=find_blue_stars(base),
     )
     G["base_warp"] = to_photo(base)
 
@@ -209,8 +252,8 @@ def rotate_region(dst, src, cx, cy, r0, r1, ang, dang):
         m *= np.clip(d - r0 + 0.5, 0, 1)
     sub = dst[y0:y1, x0:x1]
     sub[:] = sub * (1 - m[..., None]) + rot * m[..., None]
-    # Dark groove at the cut while the piece is moving.
-    groove = min(1.0, abs(dang) / 1.5) * 0.45
+    # Dark groove at the cut, deeper the faster its rim is moving.
+    groove = min(1.0, abs(dang) * math.pi / 180 * r1 / 3.0) * 0.4
     if groove > 0.01:
         g = np.exp(-((d - r1) / 1.4) ** 2)
         if r0 > 0:
@@ -220,7 +263,7 @@ def rotate_region(dst, src, cx, cy, r0, r1, ang, dang):
 
 def resonance_wave(t):
     """(front radius, displacement) of every ripple travelling at time t."""
-    fronts = [(r0 + (t - t0) * speed, amp) for t0, r0, speed, amp in WAVES if t >= t0]
+    fronts = [(r0 + ((t - t0) % LOOP) * speed, amp) for t0, r0, speed, amp in WAVES]
     return [(r, a) for r, a in fronts if -60 < r < 1200]
 
 
@@ -246,7 +289,7 @@ def apply_waves(img, t):
 def pulse_env(t):
     e = 0.0
     for tp, k in PULSES:
-        dt = t - tp
+        dt = (t - tp + LOOP / 2) % LOOP - LOOP / 2
         if -0.05 < dt < 2.0:
             e += k * (min(1.0, (dt + 0.05) / 0.05) if dt < 0 else math.exp(-dt / 0.35))
     return e
@@ -321,14 +364,12 @@ def panel_at(t):
     dt = 1.0 / FPS
     src = G["albedo"]
     alb = src.copy()
-    for i, (r0, r1) in enumerate(RINGS):
-        a, a2 = angle_at(RING_EVENTS, i, t), angle_at(RING_EVENTS, i, t + dt)
-        if abs(a) > 1e-3 or abs(a2 - a) > 1e-3:
-            rotate_region(alb, src, C, C, r0, r1, a, a2 - a)
-    for i, (x, y, r) in enumerate(ROSETTES):
-        a, a2 = angle_at(ROSETTE_EVENTS, i, t), angle_at(ROSETTE_EVENTS, i, t + dt)
-        if abs(a) > 1e-3 or abs(a2 - a) > 1e-3:
-            rotate_region(alb, src, float(x), float(y), 0, r, a, a2 - a)
+    pieces = [(C, C, r0, r1, ring_spin(i)) for i, (r0, r1, _, _) in enumerate(RINGS)]
+    pieces += [(x, y, 0, r, rosette_spin(x, y)) for x, y, r in ROSETTES]
+    pieces += [(x, y, 0, r, star_spin(x, y)) for x, y, r in G["stars"]]
+    for x, y, r0, r1, (turns, phase) in pieces:
+        a, a2 = spin(t, turns, phase), spin(t + dt, turns, phase)
+        rotate_region(alb, src, float(x), float(y), r0, r1, a, a2 - a)
 
     alb, glow = apply_waves(alb, t)
     img = alb * G["light"]

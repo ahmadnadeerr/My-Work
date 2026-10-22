@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Synthesize a seamless-looping soundtrack synced to glitch_portrait's timeline.
 
-Low drone, stone-grind while pieces turn, clunks when they lock, a resonant
-boom on each pulse and digital crackle on every glitch burst. Everything is
+Low drone, stone-grind that follows how fast the pieces turn, a clunk on
+every mechanical tick, a resonant boom on each pulse and digital crackle on
+every glitch burst. Everything is
 placed and filtered circularly over one loop, so the audio wraps cleanly.
 
 Usage:
@@ -96,12 +97,17 @@ def crackle(dur, k, hiss):
     return sig * fade * k
 
 
-def grind(events, count, lo, hi, gain):
-    """Stone-on-stone noise following each element's angular speed."""
+def ticks(phase):
+    """Times at which a piece with this phase locks onto a beat."""
+    return [((k / gp.BEATS - phase) * gp.LOOP) % gp.LOOP for k in range(gp.BEATS)]
+
+
+def grind(spins, lo, hi, gain):
+    """Stone-on-stone noise following the pieces' angular speed."""
     frames = np.arange(int(gp.LOOP * gp.FPS) + 1) / gp.FPS
     speed = np.zeros_like(frames)
-    for i in range(count):
-        a = np.array([gp.angle_at(events, i, t) for t in frames])
+    for turns, phase in spins:
+        a = np.array([gp.spin(t, turns, phase) for t in frames])
         speed += np.abs(np.gradient(a)) * gp.FPS
     env = np.interp(np.arange(N) / SR, frames, speed / max(speed.max(), 1e-6))
     return band(rng.standard_normal(N), lo, hi) * env * gain
@@ -116,21 +122,24 @@ def main(path):
     air = band(rng.standard_normal(N), 40, 400)
     mix[:] += drone + 0.25 * air / np.abs(air).max()
 
-    mix[:] += grind(gp.RING_EVENTS, len(gp.RINGS), 120, 700, 0.12)
-    mix[:] += grind(gp.ROSETTE_EVENTS, len(gp.ROSETTES), 500, 2500, 0.05)
+    rosettes = [gp.rosette_spin(x, y) for x, y, _ in gp.ROSETTES]
+    mix[:] += grind([gp.ring_spin(i) for i in range(len(gp.RINGS))], 120, 700, 0.10)
+    mix[:] += grind(rosettes, 500, 2500, 0.04)
+    mix[:] += grind([gp.star_spin(-1, 0), gp.star_spin(2000, 0)], 2500, 7000, 0.015)
 
-    ring_freq = [95, 70, 52]
-    for ring, t0, d, _ in gp.RING_EVENTS:
-        add(thunk(ring_freq[ring] * 1.3, 0.5, 0.15), t0, gain=0.25)
-        add(thunk(ring_freq[ring]), t0 + d, gain=0.6)
+    for i, (freq, gain) in enumerate([(95, 0.45), (70, 0.30), (52, 0.35)]):
+        for t0 in ticks(gp.ring_spin(i)[1]):
+            add(thunk(freq), t0, gain=gain)
 
-    for i, t0, d, _ in gp.ROSETTE_EVENTS:
-        pan = (gp.ROSETTES[i][0] - gp.C) / gp.C * 0.8
-        add(tick(rng.uniform(1700, 2600)), t0 + d, pan=pan, gain=0.25)
+    for (x, _, _), (_, phase) in zip(gp.ROSETTES, rosettes):
+        pan = (x - gp.C) / gp.C * 0.8
+        for t0 in ticks(phase):
+            add(tick(rng.uniform(1700, 2600)), t0, pan=pan, gain=0.07)
 
     for tp, k in gp.PULSES:
         add(boom(), tp, gain=0.7 * k)
-    add(swell(1.2), gp.PULSES[1][0] - 1.2, gain=0.35)
+        if k >= 1.0:  # ripple rushing inward
+            add(swell(1.2), tp - 1.2, gain=0.35)
 
     for t0, d, k, hiss in gp.GLITCHES:
         add(crackle(d, k, hiss), t0, pan=rng.uniform(-0.4, 0.4), gain=0.35)
