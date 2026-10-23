@@ -20,8 +20,18 @@ python soundtrack.py sound.wav
 ffmpeg -i video.mp4 -i sound.wav -c:v copy -c:a aac -b:a 192k final.mp4
 ```
 
+To sync to a song instead of the built-in loop, pass the track and the part
+to use (snapped to beats). Beats drive the ticks, loudness drives how far each
+tick turns, the biggest jump in loudness becomes the drop (heavy Hiss burst and
+ripples), and every 8 beats after it starts a new phrase. The song clip is
+muxed into the output (needs `pip install librosa`):
+
+```sh
+python glitch_portrait.py photo.jpg video.mp4 --music song.mp3 --start 25.1 --end 54.8
+```
+
 The panel corners, medallion centre and rosette positions in
 `glitch_portrait.py` were measured on the original 1890x2576 photo. Another
 photo needs those constants re-measured.
 
-Source photos and rendered videos are git-ignored and not committed.
+Source photos, songs and rendered videos are git-ignored and not committed.

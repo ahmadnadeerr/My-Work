@@ -4,3 +4,5 @@
 *.mp4
 *.wav
 __pycache__/
+*.mp3
+*.m4a

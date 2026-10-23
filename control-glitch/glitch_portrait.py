@@ -24,6 +24,10 @@ The panel geometry below was measured on the original 1890x2576 photo.
 
 Usage:
     python glitch_portrait.py photo.jpg out.mp4 [--mask mask.png] [--workers 4]
+    python glitch_portrait.py photo.jpg out.mp4 --music song.mp3 --start 25.1 --end 54.8
+
+With --music the moves follow the song instead (see music_sync.py) and the
+song clip is muxed into the output.
 """
 import argparse
 import math
@@ -36,7 +40,6 @@ import numpy as np
 
 FPS = 30
 LOOP = 16.0
-NFRAMES = int(FPS * LOOP)
 BEATS = 16  # mechanical ticks per loop
 
 # Glass corners in the photo (TL, TR, BR, BL) and the rectified panel size.
@@ -159,6 +162,31 @@ def find_blue_stars(base):
     return out
 
 
+class LoopTimeline:
+    """The self-contained 16 s loop with its own one-second beat."""
+    duration = LOOP
+    waves, pulses, glitches = WAVES, PULSES, GLITCHES
+
+    def lag(self, t, t0):
+        """Signed seconds since t0, wrapped onto the loop."""
+        return (t - t0 + LOOP / 2) % LOOP - LOOP / 2
+
+    def wrap(self, t):
+        return t % LOOP
+
+    def pieces(self, stars):
+        p = [(C, C, r0, r1, ring_spin(i)) for i, (r0, r1, _, _) in enumerate(RINGS)]
+        p += [(x, y, 0, r, rosette_spin(x, y)) for x, y, r in ROSETTES]
+        p += [(x, y, 0, r, star_spin(x, y)) for x, y, r in stars]
+        return p
+
+    def angle(self, t, spec):
+        return spin(t, *spec)
+
+    def beat_glow(self, t):
+        return 0.0
+
+
 # ---------------------------------------------------------------- assets --
 
 G = {}
@@ -263,7 +291,9 @@ def rotate_region(dst, src, cx, cy, r0, r1, ang, dang):
 
 def resonance_wave(t):
     """(front radius, displacement) of every ripple travelling at time t."""
-    fronts = [(r0 + ((t - t0) % LOOP) * speed, amp) for t0, r0, speed, amp in WAVES]
+    tl = G["tl"]
+    fronts = [(r0 + tl.lag(t, t0) * speed, amp) for t0, r0, speed, amp in tl.waves
+              if tl.lag(t, t0) >= 0]
     return [(r, a) for r, a in fronts if -60 < r < 1200]
 
 
@@ -288,15 +318,15 @@ def apply_waves(img, t):
 
 def pulse_env(t):
     e = 0.0
-    for tp, k in PULSES:
-        dt = (t - tp + LOOP / 2) % LOOP - LOOP / 2
+    for tp, k in G["tl"].pulses:
+        dt = G["tl"].lag(t, tp)
         if -0.05 < dt < 2.0:
             e += k * (min(1.0, (dt + 0.05) / 0.05) if dt < 0 else math.exp(-dt / 0.35))
     return e
 
 
 def glitch_state(t):
-    for t0, d, k, hiss in GLITCHES:
+    for t0, d, k, hiss in G["tl"].glitches:
         if t0 <= t < t0 + d:
             return k, hiss
     return 0.0, False
@@ -364,11 +394,9 @@ def panel_at(t):
     dt = 1.0 / FPS
     src = G["albedo"]
     alb = src.copy()
-    pieces = [(C, C, r0, r1, ring_spin(i)) for i, (r0, r1, _, _) in enumerate(RINGS)]
-    pieces += [(x, y, 0, r, rosette_spin(x, y)) for x, y, r in ROSETTES]
-    pieces += [(x, y, 0, r, star_spin(x, y)) for x, y, r in G["stars"]]
-    for x, y, r0, r1, (turns, phase) in pieces:
-        a, a2 = spin(t, turns, phase), spin(t + dt, turns, phase)
+    tl = G["tl"]
+    for x, y, r0, r1, spec in tl.pieces(G["stars"]):
+        a, a2 = tl.angle(t, spec), tl.angle(t + dt, spec)
         rotate_region(alb, src, float(x), float(y), r0, r1, a, a2 - a)
 
     alb, glow = apply_waves(alb, t)
@@ -379,7 +407,7 @@ def panel_at(t):
 
     e = pulse_env(t)
     k, hiss = glitch_state(t)
-    ring = min(1.5, e + (0.6 * k if hiss else 0.0))
+    ring = min(1.5, e + (0.6 * k if hiss else 0.0) + tl.beat_glow(t))
     if ring > 0.01:
         img = img * (1 + 0.45 * ring * G["ring_band"][..., None])
         img = img + G["ring_glow"][..., None] * red * 0.35 * ring
@@ -399,9 +427,9 @@ def render_frame(n):
     if hiss and k > 0:
         t_eff = t - float(rng.choice([0, 0, 1, 2, 4])) / FPS  # stutter
 
-    img = panel_at(t_eff % LOOP)
+    img = panel_at(G["tl"].wrap(t_eff))
     if hiss and k > 0 and rng.random() < 0.6:
-        ghost = panel_at((t_eff - 0.1) % LOOP)
+        ghost = panel_at(G["tl"].wrap(t_eff - 0.1))
         M = np.float32([[1, 0, rng.integers(-14, 15)], [0, 1, rng.integers(-6, 7)]])
         ghost = cv2.warpAffine(ghost, M, (S, S), borderMode=cv2.BORDER_REFLECT)
         img = img * 0.72 + hiss_map(ghost) * 0.28
@@ -422,8 +450,18 @@ def main():
     ap.add_argument("--mask", help="person matte (white = person); computed with rembg if omitted")
     ap.add_argument("--workers", type=int, default=os.cpu_count())
     ap.add_argument("--frames", help="only dump these frame numbers as PNGs, e.g. 30,190")
+    ap.add_argument("--music", help="song to sync to; its clip is muxed into the output")
+    ap.add_argument("--start", type=float, default=0.0, help="clip start in the song (s)")
+    ap.add_argument("--end", type=float, help="clip end in the song (s)")
     args = ap.parse_args()
 
+    if args.music:
+        from music_sync import MusicTimeline
+        G["tl"] = MusicTimeline(args.music, args.start, args.end)
+    else:
+        G["tl"] = LoopTimeline()
+    tl = G["tl"]
+    nframes = int(round(tl.duration * FPS))
     load_assets(args.photo, args.mask)
     h, w = G["photo"].shape[:2]
 
@@ -432,17 +470,24 @@ def main():
             cv2.imwrite(f"{os.path.splitext(args.output)[0]}_{n:03d}.png", render_frame(n))
         return
 
+    audio = []
+    if args.music:
+        d = tl.duration
+        audio = ["-ss", f"{tl.audio_start:.3f}", "-t", f"{d:.3f}", "-i", args.music,
+                 "-map", "0:v", "-map", "1:a", "-c:a", "aac", "-b:a", "192k",
+                 "-af", f"afade=t=in:d=0.25,afade=t=out:st={d - 1.1:.3f}:d=1.1", "-shortest"]
+        print(f"song clip {tl.audio_start:.3f}s + {d:.3f}s, drop at {tl.beats[tl.drop]:.3f}s")
     ff = subprocess.Popen([
         "ffmpeg", "-y", "-loglevel", "error", "-f", "rawvideo", "-pix_fmt", "bgr24",
-        "-s", f"{w}x{h}", "-r", str(FPS), "-i", "-",
+        "-s", f"{w}x{h}", "-r", str(FPS), "-i", "-", *audio,
         "-c:v", "libx264", "-preset", "slow", "-crf", "16", "-pix_fmt", "yuv420p",
         "-movflags", "+faststart", args.output,
     ], stdin=subprocess.PIPE)
     with mp.get_context("fork").Pool(args.workers) as pool:
-        for i, frame in enumerate(pool.imap(render_frame, range(NFRAMES), chunksize=2)):
+        for i, frame in enumerate(pool.imap(render_frame, range(nframes), chunksize=2)):
             ff.stdin.write(frame.tobytes())
             if i % 30 == 0:
-                print(f"frame {i}/{NFRAMES}", flush=True)
+                print(f"frame {i}/{nframes}", flush=True)
     ff.stdin.close()
     ff.wait()
 
