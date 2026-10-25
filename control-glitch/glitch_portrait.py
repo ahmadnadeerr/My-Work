@@ -186,6 +186,9 @@ class LoopTimeline:
     def beat_glow(self, t):
         return 0.0
 
+    def portal(self, t):
+        return None
+
 
 # ---------------------------------------------------------------- assets --
 
@@ -246,6 +249,9 @@ def load_assets(photo_path, mask_path):
         stars=find_blue_stars(base),
     )
     G["base_warp"] = to_photo(base)
+    if getattr(G.get("tl"), "portal_on", False):
+        from portal import Portal
+        G["portal"] = Portal(base, G)
 
 
 def to_photo(panel):
@@ -414,6 +420,9 @@ def panel_at(t):
     if e > 0.01:
         core = np.exp(-(G["rad"] / 38.0) ** 2)
         img = img + core[..., None] * red * 0.7 * e
+    state = tl.portal(t)
+    if state:
+        img = G["portal"].blend(img, state, t)
     return img
 
 
@@ -453,11 +462,13 @@ def main():
     ap.add_argument("--music", help="song to sync to; its clip is muxed into the output")
     ap.add_argument("--start", type=float, default=0.0, help="clip start in the song (s)")
     ap.add_argument("--end", type=float, help="clip end in the song (s)")
+    ap.add_argument("--portal", action="store_true",
+                    help="with --music: open the medallion into a trailer-style kaleidoscope")
     args = ap.parse_args()
 
     if args.music:
         from music_sync import MusicTimeline
-        G["tl"] = MusicTimeline(args.music, args.start, args.end)
+        G["tl"] = MusicTimeline(args.music, args.start, args.end, portal=args.portal)
     else:
         G["tl"] = LoopTimeline()
     tl = G["tl"]

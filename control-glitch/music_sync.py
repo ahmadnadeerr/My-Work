@@ -5,6 +5,10 @@ biggest jump in loudness becomes "the drop" (a heavy Hiss burst with ripples
 rushing in and out of the medallion), every 8 beats after it starts a new
 phrase with its own ripple and glitch, and the hardest accents get short
 glitch hits.
+
+With portal=True the medallion also opens into the kaleidoscope from
+portal.py for three phrases after the drop, cutting between its looks on
+the beat like the end of the CONTROL Resonant trailer.
 """
 import math
 import subprocess
@@ -30,7 +34,7 @@ def ease_out_cubic(x):
 
 
 class MusicTimeline:
-    def __init__(self, audio_path, start, end):
+    def __init__(self, audio_path, start, end, portal=False):
         import librosa
 
         y = decode(audio_path)
@@ -90,6 +94,10 @@ class MusicTimeline:
         for k in phrases[1:]:
             big = (k - self.drop) % 16 == 0
             g.append((t[k] - 0.02, 0.32 if big else 0.2, 0.85 if big else 0.6, big))
+        self.portal_on = portal
+        if portal:  # cuts between portal looks
+            for b, d, k in [(4, 0.10, 0.55), (34, 0.10, 0.55), (38, 0.12, 0.6), (40, 0.12, 0.6)]:
+                g.append((t[self.drop + b] - 0.02, d, k, False))
         taken = {self.drop - 4 + i for i in range(5)} | set(phrases)
         loud_hits = hits[k0:k1][loud[k0:k1]]
         cut = np.percentile(loud_hits, 75) if len(loud_hits) else np.inf
@@ -140,6 +148,58 @@ class MusicTimeline:
     def angle(self, t, spec):
         mult, delay = spec
         return mult * self.turned(self.position(t) - delay)
+
+    def portal(self, t):
+        """Kaleidoscope state at time t, or None while the real mosaic shows."""
+        if not self.portal_on:
+            return None
+        q = self.position(t) - self.idx[self.drop]  # beats since the drop
+        if not (-2 <= q < 8 or 16 <= q < 24 or 32 <= q < 41):
+            return None
+        k = math.floor(q)
+        since = lambda b: t - self.beats[self.drop + b]
+        kick = lambda step: step * (k + ease_out_cubic(min(1.0, (q - k) * 4)))
+        flash = 0.3 * math.exp(-max(0.0, since(k)) / 0.1) if q >= 0 else 0.0
+
+        def blue(t0):
+            return dict(look="blue", sectors=16, spin=0.35 * t, slice=0.35 + kick(0.18),
+                        zoom=0.9 * since(t0) + kick(0.12), void=110, flash=flash)
+
+        def white(t0, **kw):
+            return dict(look="white", sectors=24, spin=-0.2 * t, slice=1.1 + kick(0.05),
+                        zoom=0.25 * since(t0) + kick(0.08), flash=flash, **kw)
+
+        def red(t0, liquid):
+            return dict(look="red", sectors=16, spin=0.12 * t, slice=0.8 + kick(0.03),
+                        zoom=-0.2 * since(t0) - kick(0.05), eclipse=360, liquid=liquid,
+                        flash=flash)
+
+        if q < 0:  # the core turns into a small portal on the last two beats
+            f = (q + 2) / 2
+            s = blue(-2)
+            s.update(void=40 * f, iris=165 * gp.smootherstep(f), flash=0.0)
+            return s
+        if q < 8:  # the drop: it bursts open, blue tunnel then white mandala
+            s = blue(0) if q < 4 else white(0)
+            s["iris"] = 165 + 985 * ease_out_cubic(min(1.0, since(0) / 0.2))
+            return s
+        if q < 24:  # Hiss phrase: red eclipse opening as an iris
+            s = red(16, 18)
+            s["iris"] = 1150 * ease_out_cubic(min(1.0, since(16) / 0.25))
+            return s
+        # Last phrase: the trailer's sequence in fast cuts, then it collapses.
+        if q < 34:
+            s = blue(32)
+        elif q < 36:
+            s = white(32)
+        elif q < 38:
+            s = white(32, flood=1100 - 800 * gp.smootherstep((q - 36) / 2))
+        else:
+            s = red(32, 30)
+        s["iris"] = 1150 * ease_out_cubic(min(1.0, since(32) / 0.12))
+        if q >= 40:
+            s["iris"] = 1150 * (1 - gp.smootherstep(min(1.0, (q - 40) / 0.8)))
+        return s
 
     def beat_glow(self, t):
         p = self.position(t)

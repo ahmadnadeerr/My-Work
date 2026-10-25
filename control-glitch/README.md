@@ -30,6 +30,12 @@ muxed into the output (needs `pip install librosa`):
 python glitch_portrait.py photo.jpg video.mp4 --music song.mp3 --start 25.1 --end 54.8
 ```
 
+Add `--portal` to also open the medallion into a kaleidoscope, like the end
+of the CONTROL Resonant trailer (`portal.py`): the mosaic's own glass folded
+into a mirrored 16/24-fold kaleidoscope and streamed through a log-polar
+tunnel, cutting on the beat between a blue tunnel, a white mandala on black
+and a Hiss-red eclipse with liquid smearing. It stays inside the panel.
+
 The panel corners, medallion centre and rosette positions in
 `glitch_portrait.py` were measured on the original 1890x2576 photo. Another
 photo needs those constants re-measured.
